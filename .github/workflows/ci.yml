@@ -1,4 +1,4 @@
-name: CI
+name: ci
 on: [push, pull_request]
 jobs:
   test:
@@ -7,7 +7,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - run: pip install -r requirements.txt || true
-      - run: python - <<'PY'
-print("smoke test ok")
-PY
+      - run: python -m pip install -U pip && pip install -r requirements.txt
+      - run: PYTHONPATH=src pytest -q
