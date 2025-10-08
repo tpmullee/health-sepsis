@@ -1,16 +1,60 @@
-import numpy as np
-from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-# Synthetic "sepsis" classification with class imbalance
-np.random.seed(0)
-N=4000
-X = np.random.normal(0,1,(N,6))
-w = np.array([0.9,0.6,0.3,0.2,0.1,0.05])
-logit = X.dot(w) + np.random.normal(0,0.5,N)
-p = 1/(1+np.exp(-logit))
-y = (p>0.8).astype(int)  # imbalance
-Xtr,Xte,ytr,yte = train_test_split(X,y,stratify=y,test_size=0.2,random_state=7)
-clf = LogisticRegression(max_iter=1000).fit(Xtr,ytr)
-proba = clf.predict_proba(Xte)[:,1]
-print("AUROC:", round(roc_auc_score(yte, proba),3))
+from __future__ import annotations
+import json, os
+from pathlib import Path
+import joblib, numpy as np, pandas as pd, typer
+from health_sepsis.data.loaders import load_synthetic_cohort
+from health_sepsis.features.engineer import basic_features, NUMERIC, CATEGORICAL
+from health_sepsis.models.train import build_preprocessor, make_models, build_pipelines
+from health_sepsis.eval.metrics import classification_report_dict, reliability
+from health_sepsis.innovations.triage_optimizer import optimize_triage, summarize
+app = typer.Typer(add_completion=False)
+
+ART = Path("artifacts"); ART.mkdir(exist_ok=True)
+
+@app.command()
+def demo_train(seed: int = 7):
+    """Train baseline models on synthetic cohort; save best pipeline."""
+    df = load_synthetic_cohort(seed=seed)
+    X, y, num, cat = basic_features(df)
+    # split
+    msk = np.random.RandomState(seed).rand(len(df)) < 0.8
+    X_train, y_train = X[msk], y[msk]
+    X_test,  y_test  = X[~msk], y[~msk]
+
+    pre = build_preprocessor(num, cat)
+    pipes = build_pipelines(pre, make_models())
+
+    scores = {}
+    for name, pipe in pipes.items():
+        pipe.fit(X_train, y_train)
+        p = pipe.predict_proba(X_test)[:,1]
+        scores[name] = classification_report_dict(y_test, p)
+        joblib.dump(pipe, ART/f"model_{name}.joblib")
+    best = max(scores.items(), key=lambda kv: kv[1]["auc_pr"])[0]
+    print("Model leaderboard:", json.dumps(scores, indent=2))
+    # Save winner + columns
+    Path(ART).mkdir(exist_ok=True)
+    joblib.dump(pipes[best], ART/"model.joblib")
+    with open(ART/"columns.json","w") as f: json.dump(list(X.columns), f)
+    # Write quick reliability
+    with open(ART/"reliability.json","w") as f: json.dump(reliability(y_test, p), f)
+    print(f"Saved {best} to artifacts/model.joblib")
+
+@app.command()
+def optimize(capacity: int = 100):
+    """Run capacity-aware triage optimization on a held-out sample."""
+    df = load_synthetic_cohort(seed=9)  # new draw
+    X, y, *_ = basic_features(df)
+    model = joblib.load(ART/"model.joblib")
+    p = model.predict_proba(X)[:,1]
+    mask, thr = optimize_triage(p, capacity=capacity, benefit_tp=1.0, cost_fp=0.25)
+    print({"threshold": thr})
+    print(summarize(mask, y.values, p).to_dict())
+
+@app.command()
+def serve(host: str="127.0.0.1", port: int=8000):
+    """Start FastAPI server (uvicorn)."""
+    os.execvp("uvicorn", ["uvicorn", "health_sepsis.serving.app:app", "--host", host, "--port", str(port)])
+
+if __name__ == "__main__":
+    app()
