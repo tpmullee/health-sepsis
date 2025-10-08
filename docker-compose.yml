@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  sepsis-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+    # To use locally trained artifacts without rebuilding the image:
+    # volumes:
+        - ./artifacts:/app/artifacts:ro
